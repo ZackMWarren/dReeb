@@ -1,0 +1,93 @@
+# ─── Python ───────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pdb
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+MANIFEST
+pip-wheel-metadata/
+share/python-wheels/
+
+# ─── Virtual Environments ─────────────────────────────
+venv/
+env/
+.venv/
+test_env/
+.env
+
+# ─── Distribution / Packaging ─────────────────────────
+.Python
+develop-eggs/
+downloads/
+eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.tar.gz
+*.whl
+
+# ─── Testing ──────────────────────────────────────────
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+nosetests.xml
+coverage.xml
+*.cover
+
+# ─── Numba ────────────────────────────────────────────
+__pycache__/
+*.nbc
+*.nbi
+
+# ─── Jupyter ──────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb
+profile_default/
+ipython_config.py
+
+# ─── macOS ────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# ─── VS Code ──────────────────────────────────────────
+.vscode/
+*.code-workspace
+
+# ─── PyCharm / JetBrains ──────────────────────────────
+.idea/
+*.iml
+*.iws
+
+# ─── Data / Output files ──────────────────────────────
+*.npz
+*.npy
+*.pkl
+*.pickle
+*.csv
+*.h5
+*.hdf5
+
+# ─── Logs ─────────────────────────────────────────────
+*.log
+logs/
+
+# ─── OS ───────────────────────────────────────────────
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
