@@ -1,40 +1,11 @@
 [build-system]
-requires = ["setuptools>=61", "wheel"]
-build-backend = "setuptools.backends.legacy:build"
+requires = ["setuptools>=42"]
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "dreeb"
 version = "0.1.0"
-description = "Diffusion Reeb graph construction for topological data analysis"
-readme = "README.md"
-license = { file = "LICENSE" }
 requires-python = ">=3.8"
-
-authors = [
-    { name = "Your Name", email = "you@email.com" }
-]
-
-keywords = [
-    "topology",
-    "reeb graph",
-    "diffusion geometry",
-    "topological data analysis",
-    "manifold learning",
-]
-
-classifiers = [
-    "Development Status :: 3 - Alpha",
-    "Intended Audience :: Science/Research",
-    "Topic :: Scientific/Engineering :: Mathematics",
-    "License :: OSI Approved :: MIT License",
-    "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
-    "Programming Language :: Python :: 3.9",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
-]
-
-# core dependencies only — keep this minimal
 dependencies = [
     "numpy>=1.21",
     "scipy>=1.7",
@@ -42,40 +13,5 @@ dependencies = [
     "numba>=0.56",
 ]
 
-[project.optional-dependencies]
-viz = [
-    "matplotlib>=3.5",
-    "networkx>=2.8",
-]
-io = [
-    "networkx>=2.8",
-]
-dev = [
-    "pytest>=7.0",
-    "pytest-cov",
-    "black",
-    "ruff",
-    "matplotlib>=3.5",
-    "networkx>=2.8",
-]
-all = [
-    "matplotlib>=3.5",
-    "networkx>=2.8",
-]
-
-[project.urls]
-Homepage = "https://github.com/ZackMWarren/dreeb"
-Repository = "https://github.com/ZackMWarren/dreeb"
-
 [tool.setuptools.packages.find]
 where = ["src"]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-
-[tool.black]
-line-length = 88
-target-version = ["py38"]
-
-[tool.ruff]
-line-length = 88
