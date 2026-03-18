@@ -42,7 +42,7 @@ def dreeb(X, k=80, precision=1.0):
     """
     W = build_affinity_matrix(X, k=k)
     P = build_diffusion_operator(W)
-    components, roots_A, roots_B, diameters, cost = find_endpoints(P)
+    components, roots_A, roots_B, cost, diameters = find_endpoints(P)
     filter_values, distA, distB = compute_filter(
         P, cost, components, roots_A, roots_B, precision=precision
     )
