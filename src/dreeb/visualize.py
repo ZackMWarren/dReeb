@@ -1,6 +1,7 @@
 try:
     import matplotlib.pyplot as plt
     import networkx as nx
+    from matplotlib.patches import FancyArrowPatch
 except ImportError:
     raise ImportError(
         "Visualization requires matplotlib and networkx. "
@@ -9,6 +10,27 @@ except ImportError:
 
 import numpy as np
 from collections import defaultdict, Counter
+
+
+def _parallel_edge_radii(count, base=0.18):
+    """
+    Symmetric arc radii for drawing parallel undirected edges.
+
+    Examples:
+    count=1 -> [0.0]
+    count=2 -> [-0.18, 0.18]
+    count=3 -> [-0.18, 0.0, 0.18]
+    count=4 -> [-0.36, -0.12, 0.12, 0.36]
+    """
+    if count <= 1:
+        return [0.0]
+
+    if count % 2 == 1:
+        offsets = np.arange(-(count // 2), count // 2 + 1, dtype=float)
+    else:
+        offsets = np.arange(-count + 1, count, 2, dtype=float) / 2.0
+
+    return (base * offsets).tolist()
 
 
 def plot_reeb(
@@ -136,30 +158,34 @@ def plot_reeb(
         fig, ax = plt.subplots(figsize=figsize)
         ax.scatter(pts[:, 0], pts[:, 1], s=3, alpha=0.15, color="gray")
 
-        base_delta = 0.015 * span
+        arc_base = 0.22
+        node_size = 95
+        node_linewidth = 0.9
 
         # parallel edges
         for (a, b), elist in pair_to_edges.items():
             p0, p1 = node_pos[a], node_pos[b]
-            d = p1 - p0
-            if np.allclose(d, 0):
-                continue
-            perp = np.array([-d[1], d[0]])
-            perp /= (np.linalg.norm(perp) + 1e-12)
-
             m = len(elist)
             is_cyc = pair_is_cycle[(a, b)]
             col = (cycle_color if (color_cycles and is_cyc) else noncycle_color)
+            radii = _parallel_edge_radii(m, base=arc_base)
+            line_width = 1.4 if m == 1 else 1.2
 
-            if m == 1:
-                ax.plot([p0[0], p1[0]], [p0[1], p1[1]],
-                        color=col, linewidth=1.4, alpha=0.9, zorder=2)
-            else:
-                for k in range(m):
-                    off = (k - (m - 1) / 2.0) * base_delta * perp
-                    q0, q1 = p0 + off, p1 + off
-                    ax.plot([q0[0], q1[0]], [q0[1], q1[1]],
-                            color=col, linewidth=1.1, alpha=0.9, zorder=2)
+            for rad in radii:
+                patch = FancyArrowPatch(
+                    posA=(p0[0], p0[1]),
+                    posB=(p1[0], p1[1]),
+                    arrowstyle="-",
+                    connectionstyle=f"arc3,rad={rad}",
+                    mutation_scale=1.0,
+                    linewidth=line_width,
+                    color=col,
+                    alpha=0.9,
+                    zorder=2,
+                    shrinkA=0,
+                    shrinkB=0,
+                )
+                ax.add_patch(patch)
 
         # self-loops
         for u, count in loop_counts.items():
@@ -174,15 +200,15 @@ def plot_reeb(
 
         # nodes
         ax.scatter(node_pos[:, 0], node_pos[:, 1],
-                   s=40, c="gold", edgecolors="black",
-                   linewidths=0.8, zorder=3)
+                   s=node_size, c="gold", edgecolors="black",
+                   linewidths=node_linewidth, zorder=3)
 
         # degree labels
         if label_degree:
             for i in range(simp_num_nodes):
                 x, y = node_pos[i]
                 ax.text(x, y, str(deg_map.get(i, 0)),
-                        fontsize=9, ha="center", va="center",
+                        fontsize=9.5, ha="center", va="center",
                         color="black", zorder=4)
 
         ax.set_title("Simplified Reeb Graph")
