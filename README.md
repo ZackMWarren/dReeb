@@ -21,7 +21,12 @@ pip install dreeb
 After installation, both the main pipeline and plotting are available directly:
 
 ```python
-from dreeb import dreeb, plot_dreeb
+from dreeb import (
+    dreeb,
+    plot_dreeb,
+    extract_cellular_trajectory,
+    enumerate_terminal_cellular_trajectories,
+)
 ```
 
 ## Quickstart
@@ -98,6 +103,7 @@ result = dreeb(
     return_raw_persistence=True,
     return_point_assignment=True,
     return_edge_assignment=True,
+    return_cellular_decomposition=True,
     return_intermediates=True,
 )
 ```
@@ -116,7 +122,10 @@ result = dreeb(
 - `return_point_assignment=True`
   Return node-level point ownership in the active graph section.
 - `return_edge_assignment=True`
-  Return edge-level point support in the graph sections.
+  Return edge-level support and ownership outputs in the graph sections.
+- `return_cellular_decomposition=True`
+  Return a mixed disjoint partition of all points onto simplified node cells
+  and simplified edge cells. Requires `simplify=True`.
 - `return_intermediates=True`
   Return matrices and arrays needed for debugging or plotting.
 
@@ -161,7 +170,20 @@ Simplified graph plus edge assignment:
 result = dreeb(X, return_edge_assignment=True)
 
 edge_points = result["simplified"]["edge_points"]
+edge_support_points = result["simplified"]["edge_support_points"]
+point_edge_assignment = result["simplified"]["point_edge_assignment"]
 point_edges = result["simplified"]["point_edges"]
+```
+
+Simplified graph plus cellular decomposition:
+
+```python
+result = dreeb(X, return_cellular_decomposition=True)
+
+cell_kind = result["simplified"]["cell_assignment_kind"]
+cell_id = result["simplified"]["cell_assignment_id"]
+node_cells = result["simplified"]["node_cells"]
+edge_cells = result["simplified"]["edge_cells"]
 ```
 
 Raw persistence without returning raw edges explicitly:
@@ -182,16 +204,17 @@ There are two related but different node-level outputs:
 - `node_support_points`: the intrinsic local support of each node
 
 If you want the points supporting a trajectory through the simplified graph,
-use `edge_points` together with a graph path in `result["simplified"]["edges"]`
-and take the union of the edge supports along that path.
+use `edge_support_points` together with a graph path in
+`result["simplified"]["edges"]` and take the union of the edge supports along
+that path.
 
 When `simplify=True`:
 
-- points already belonging to kept raw nodes are assigned to the corresponding
-  simplified node
-- points belonging to contracted raw nodes are reassigned to the nearest kept
-  endpoint along the contracted raw-graph path behind that simplified edge
-- any remaining points fall back to the closest kept node in filter space
+- `node_support_points` are inherited from the kept raw nodes
+- `node_points` are a full ownership partition of the dataset onto simplified
+  nodes
+- ownership is computed by graph Voronoi on the original point graph using
+  shortest-path distance on the symmetrized diffusion operator
 
 When `simplify=False`:
 
@@ -209,8 +232,10 @@ Edge assignment is opt-in via `return_edge_assignment=True`.
 
 Returned fields:
 
-- `edge_points`: list of point index arrays per edge
-- `point_edges`: list of edge id arrays per point
+- `edge_points`: ownership partition of points per edge
+- `point_edge_assignment`: one edge id per point
+- `edge_support_points`: intrinsic support points per edge
+- `point_edges`: overlapping edge-support memberships per point
 
 Raw edge assignment rule:
 
@@ -220,8 +245,75 @@ Raw edge assignment rule:
 
 Simplified edge assignment rule:
 
-- simplified edge support is the union of the raw edge supports along the
-  contracted path behind that simplified edge
+- simplified edge support is inherited from the contracted raw path behind that
+  simplified edge
+- inherited support includes raw edge supports on that path plus the support
+  points of contracted interior raw nodes
+- simplified edge ownership is a full partition of the dataset onto simplified
+  edges
+- ownership is computed by graph Voronoi on the original point graph using
+  shortest-path distance on the symmetrized diffusion operator
+
+## Cellular Decomposition
+
+Cellular decomposition is opt-in via `return_cellular_decomposition=True` and
+is only defined on the simplified graph.
+
+It is a mixed disjoint partition of the whole dataset onto:
+
+- simplified node cells, corresponding to 0-cells
+- simplified edge cells, corresponding to 1-cells
+
+Returned fields:
+
+- `cell_assignment_kind`: per-point `"node"` or `"edge"`
+- `cell_assignment_id`: per-point simplified node id or simplified edge id
+- `node_cells`: list of point index arrays, one per simplified node
+- `edge_cells`: list of point index arrays, one per simplified edge
+
+This decomposition uses the same graph metric as the ownership assignments:
+shortest-path distance on the symmetrized diffusion operator, comparing node
+supports against edge supports directly.
+
+Helper for extracting points from selected cells:
+
+```python
+from dreeb import extract_cellular_trajectory
+
+result = dreeb(X, return_cellular_decomposition=True)
+simplified = result["simplified"]
+
+# Mixed cell indexing: nodes first, then edges.
+points = extract_cellular_trajectory(simplified, cell_indices=[0, 3, 7])
+```
+
+If there are `n` simplified nodes, then:
+
+- cell indices `0 .. n-1` are node cells
+- cell indices `n .. n + m - 1` are edge cells
+
+Helper for enumerating terminal cellular trajectories:
+
+```python
+from dreeb import enumerate_terminal_cellular_trajectories
+
+result = dreeb(
+    X,
+    return_edge_lengths=True,
+    return_cellular_decomposition=True,
+)
+trajectories = enumerate_terminal_cellular_trajectories(result["simplified"])
+
+top = trajectories[0]
+top["node_path"]
+top["edge_path"]
+top["cell_indices"]
+top["graph_length"]
+```
+
+Here, a terminal simplified node means a node whose multigraph degree is not
+equal to `2`, so trajectories run between leaf tips, branch points, isolated
+nodes, or loop anchors.
 
 ## Edge Lengths
 

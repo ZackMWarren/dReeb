@@ -10,6 +10,7 @@ from .simplify import (
     assign_points_to_raw_nodes,
     assign_points_to_raw_edges,
     assign_points_to_simplified_edges,
+    build_simplified_cellular_decomposition,
 )
 
 
@@ -25,6 +26,7 @@ def dreeb(
     return_raw_persistence=False,
     return_point_assignment=False,
     return_edge_assignment=False,
+    return_cellular_decomposition=False,
     return_intermediates=False,
 ):
     """
@@ -63,6 +65,9 @@ def dreeb(
     return_edge_assignment : bool, optional (default: False)
         If True, assign points to raw and/or simplified edges using
         adjacent-slice bridging regions.
+    return_cellular_decomposition : bool, optional (default: False)
+        If True and simplify=True, return a mixed disjoint partition of
+        all points onto simplified node cells and simplified edge cells.
     return_intermediates : bool, optional (default: False)
         If True, include intermediate matrices and arrays used during
         construction.
@@ -77,6 +82,11 @@ def dreeb(
         - raw           : raw graph section, when requested/primary
         - intermediates : intermediate construction outputs, when requested
     """
+    if return_cellular_decomposition and not simplify:
+        raise ValueError(
+            "return_cellular_decomposition=True requires simplify=True."
+        )
+
     W = build_affinity_matrix(X, k=k)
     filter_values, components, diffusion_eigenvalues = compute_diffusion_filter(
         W,
@@ -99,7 +109,7 @@ def dreeb(
     raw_edge_points = None
 
     if simplify:
-        if return_edge_assignment or return_point_assignment:
+        if return_edge_assignment or return_point_assignment or return_cellular_decomposition:
             (
                 simp_edges,
                 keep_ids,
@@ -137,14 +147,13 @@ def dreeb(
 
         if return_point_assignment:
             point_assignment, node_points, node_support_points = assign_points_to_simplified_nodes(
+                W=W,
                 reeb_nodes=reeb_nodes,
                 keep_ids=keep_ids,
                 simp_node_paths=simp_node_paths,
                 step_vertices=step_vertices,
                 step_comp_ids=step_comp_ids,
                 uniq_v=prep_state["uniq_v"],
-                filter_values=filter_values,
-                t_vals=prep_state["t_vals"],
             )
             simp_section["point_assignment"] = point_assignment
             simp_section["node_points"] = node_points
@@ -160,13 +169,28 @@ def dreeb(
                 uniq_v=prep_state["uniq_v"],
                 level_of=prep_state["level_of"],
             )
-            simp_point_edges, simp_edge_points = assign_points_to_simplified_edges(
+            (
+                simp_point_edge_assignment,
+                simp_edge_points,
+                simp_point_edges,
+                simp_edge_support_points,
+            ) = assign_points_to_simplified_edges(
+                W=W,
+                reeb_nodes=reeb_nodes,
+                keep_ids=keep_ids,
+                simp_edges=simp_edges,
                 simp_edge_paths=simp_edge_paths,
+                simp_node_paths=simp_node_paths,
                 raw_edge_points=raw_edge_points,
+                step_vertices=step_vertices,
+                step_comp_ids=step_comp_ids,
+                uniq_v=prep_state["uniq_v"],
                 num_points=X.shape[0],
             )
+            simp_section["point_edge_assignment"] = simp_point_edge_assignment
             simp_section["point_edges"] = simp_point_edges
             simp_section["edge_points"] = simp_edge_points
+            simp_section["edge_support_points"] = simp_edge_support_points
             if raw_section is None:
                 raw_section = {
                     "nodes": reeb_nodes,
@@ -177,6 +201,69 @@ def dreeb(
                 raw_section.setdefault("edges", reeb_edges)
             raw_section["point_edges"] = raw_point_edges
             raw_section["edge_points"] = raw_edge_points
+
+        if return_cellular_decomposition:
+            if "node_support_points" not in simp_section:
+                point_assignment, node_points, node_support_points = assign_points_to_simplified_nodes(
+                    W=W,
+                    reeb_nodes=reeb_nodes,
+                    keep_ids=keep_ids,
+                    simp_node_paths=simp_node_paths,
+                    step_vertices=step_vertices,
+                    step_comp_ids=step_comp_ids,
+                    uniq_v=prep_state["uniq_v"],
+                )
+                simp_section["point_assignment"] = point_assignment
+                simp_section["node_points"] = node_points
+                simp_section["node_support_points"] = node_support_points
+
+            if "edge_support_points" not in simp_section:
+                raw_point_edges, raw_edge_points = assign_points_to_raw_edges(
+                    W=W,
+                    reeb_nodes=reeb_nodes,
+                    reeb_edges=reeb_edges,
+                    step_vertices=step_vertices,
+                    step_comp_ids=step_comp_ids,
+                    uniq_v=prep_state["uniq_v"],
+                    level_of=prep_state["level_of"],
+                )
+                (
+                    simp_point_edge_assignment,
+                    simp_edge_points,
+                    simp_point_edges,
+                    simp_edge_support_points,
+                ) = assign_points_to_simplified_edges(
+                    W=W,
+                    reeb_nodes=reeb_nodes,
+                    keep_ids=keep_ids,
+                    simp_edges=simp_edges,
+                    simp_edge_paths=simp_edge_paths,
+                    simp_node_paths=simp_node_paths,
+                    raw_edge_points=raw_edge_points,
+                    step_vertices=step_vertices,
+                    step_comp_ids=step_comp_ids,
+                    uniq_v=prep_state["uniq_v"],
+                    num_points=X.shape[0],
+                )
+                simp_section["point_edge_assignment"] = simp_point_edge_assignment
+                simp_section["point_edges"] = simp_point_edges
+                simp_section["edge_points"] = simp_edge_points
+                simp_section["edge_support_points"] = simp_edge_support_points
+
+            (
+                cell_assignment_kind,
+                cell_assignment_id,
+                node_cells,
+                edge_cells,
+            ) = build_simplified_cellular_decomposition(
+                W=W,
+                node_support_points=simp_section["node_support_points"],
+                edge_support_points=simp_section["edge_support_points"],
+            )
+            simp_section["cell_assignment_kind"] = cell_assignment_kind
+            simp_section["cell_assignment_id"] = cell_assignment_id
+            simp_section["node_cells"] = node_cells
+            simp_section["edge_cells"] = edge_cells
 
         if return_raw_persistence:
             raw_edge_lengths = compute_edge_lengths(reeb_nodes, reeb_edges, t_vals)

@@ -1,6 +1,8 @@
 import numpy as np
 import scipy.sparse as sp
-from scipy.sparse.csgraph import connected_components
+from scipy.sparse.csgraph import connected_components, dijkstra
+
+from .graph import build_diffusion_operator
 
 
 def _compute_raw_node_supports(
@@ -27,6 +29,326 @@ def _compute_raw_node_supports(
             comp_vs = vs
         node_points.append(np.unique(uniq_v_arr[comp_vs]))
     return node_points
+
+
+def _build_symmetrized_diffusion_cost_graph(W, eps=1e-12):
+    """
+    Build an undirected shortest-path metric from the symmetrized
+    row-stochastic diffusion operator.
+    """
+    if not sp.isspmatrix(W):
+        W = sp.csr_matrix(W)
+    W = W.tocsr().astype(float)
+    W = W.maximum(W.T)
+    W.setdiag(0)
+    W.eliminate_zeros()
+
+    P = build_diffusion_operator(W).tocsr().astype(float)
+    P_sym = (0.5 * (P + P.T)).tocsr()
+    P_sym.setdiag(0)
+    P_sym.eliminate_zeros()
+
+    cost_graph = P_sym.copy()
+    cost_graph.data = -np.log(np.clip(cost_graph.data, eps, None))
+    return cost_graph.tocsr()
+
+
+def _multi_source_distances(cost_graph, support_points):
+    """
+    Compute distance from every point to each support set.
+    """
+    num_points = cost_graph.shape[0]
+    distances = np.full((len(support_points), num_points), np.inf, dtype=float)
+    for obj_id, pts in enumerate(support_points):
+        pts = np.unique(np.asarray(pts, dtype=int))
+        if pts.size == 0:
+            continue
+        dist = dijkstra(cost_graph, directed=False, indices=pts)
+        if dist.ndim == 1:
+            distances[obj_id] = dist
+        else:
+            distances[obj_id] = np.min(dist, axis=0)
+    return distances
+
+
+def _partition_from_distances(distances, candidate_ids=None):
+    """
+    Assign each point to the nearest object with deterministic tie-breaks
+    from object order.
+    """
+    num_objects, num_points = distances.shape
+    assignment = -np.ones(num_points, dtype=int)
+    if num_objects == 0:
+        return assignment
+
+    if candidate_ids is None:
+        finite_cols = np.any(np.isfinite(distances), axis=0)
+        if np.any(finite_cols):
+            assignment[finite_cols] = np.argmin(distances[:, finite_cols], axis=0)
+        return assignment
+
+    for point_id in range(num_points):
+        candidates = np.asarray(candidate_ids[point_id], dtype=int)
+        if candidates.size == 0:
+            continue
+        point_dist = distances[candidates, point_id]
+        finite = np.isfinite(point_dist)
+        if not np.any(finite):
+            continue
+        assignment[point_id] = int(candidates[np.argmin(point_dist)])
+    return assignment
+
+
+def _assignment_to_point_lists(assignment, num_objects):
+    point_lists = []
+    for obj_id in range(int(num_objects)):
+        point_lists.append(np.flatnonzero(assignment == obj_id))
+    return point_lists
+
+
+def _build_point_memberships(support_points, num_points):
+    memberships = [[] for _ in range(int(num_points))]
+    for obj_id, pts in enumerate(support_points):
+        for point_id in np.asarray(pts, dtype=int):
+            memberships[int(point_id)].append(int(obj_id))
+    return [np.array(ids, dtype=int) for ids in memberships]
+
+
+def build_simplified_cellular_decomposition(
+    W,
+    node_support_points,
+    edge_support_points,
+):
+    """
+    Build a mixed node/edge cellular decomposition on the simplified graph.
+
+    Each point is assigned to exactly one simplified node cell or one
+    simplified edge cell using graph Voronoi distance on the symmetrized
+    diffusion metric.
+    """
+    num_points = W.shape[0]
+    cost_graph = _build_symmetrized_diffusion_cost_graph(W)
+    node_distances = _multi_source_distances(cost_graph, node_support_points)
+    edge_distances = _multi_source_distances(cost_graph, edge_support_points)
+
+    cell_assignment_kind = np.empty(num_points, dtype="<U4")
+    cell_assignment_id = -np.ones(num_points, dtype=int)
+
+    node_cells_accum = [[] for _ in range(len(node_support_points))]
+    edge_cells_accum = [[] for _ in range(len(edge_support_points))]
+
+    for point_id in range(num_points):
+        best_node = np.inf
+        best_node_id = -1
+        if node_distances.shape[0] > 0:
+            d = node_distances[:, point_id]
+            finite = np.isfinite(d)
+            if np.any(finite):
+                best_node_id = int(np.argmin(d))
+                best_node = float(d[best_node_id])
+
+        best_edge = np.inf
+        best_edge_id = -1
+        if edge_distances.shape[0] > 0:
+            d = edge_distances[:, point_id]
+            finite = np.isfinite(d)
+            if np.any(finite):
+                best_edge_id = int(np.argmin(d))
+                best_edge = float(d[best_edge_id])
+
+        if best_node <= best_edge:
+            cell_assignment_kind[point_id] = "node"
+            cell_assignment_id[point_id] = best_node_id
+            if best_node_id >= 0:
+                node_cells_accum[best_node_id].append(point_id)
+        else:
+            cell_assignment_kind[point_id] = "edge"
+            cell_assignment_id[point_id] = best_edge_id
+            if best_edge_id >= 0:
+                edge_cells_accum[best_edge_id].append(point_id)
+
+    node_cells = [np.array(ids, dtype=int) for ids in node_cells_accum]
+    edge_cells = [np.array(ids, dtype=int) for ids in edge_cells_accum]
+    return cell_assignment_kind, cell_assignment_id, node_cells, edge_cells
+
+
+def extract_cellular_trajectory(simplified_graph, cell_indices):
+    """
+    Extract the unique point indices belonging to selected simplified cells.
+
+    The mixed cell index space is:
+    - `0 .. num_nodes - 1` for simplified node cells
+    - `num_nodes .. num_nodes + num_edges - 1` for simplified edge cells
+
+    Parameters
+    ----------
+    simplified_graph : dict
+        The `result["simplified"]` section returned by `dreeb(...)` with
+        `return_cellular_decomposition=True`.
+    cell_indices : sequence of int
+        Mixed cell indices in the combined node-then-edge indexing.
+
+    Returns
+    -------
+    np.ndarray
+        Sorted unique point indices belonging to the selected cells.
+    """
+    if "node_cells" not in simplified_graph or "edge_cells" not in simplified_graph:
+        raise ValueError(
+            "simplified_graph must contain `node_cells` and `edge_cells`; "
+            "run dreeb(..., return_cellular_decomposition=True)."
+        )
+
+    node_cells = simplified_graph["node_cells"]
+    edge_cells = simplified_graph["edge_cells"]
+    num_nodes = len(node_cells)
+    num_edges = len(edge_cells)
+    total_cells = num_nodes + num_edges
+
+    pieces = []
+    for cell_idx in np.asarray(cell_indices, dtype=int):
+        if cell_idx < 0 or cell_idx >= total_cells:
+            raise IndexError(
+                f"cell index {cell_idx} out of range for {total_cells} total cells."
+            )
+        if cell_idx < num_nodes:
+            pts = np.asarray(node_cells[int(cell_idx)], dtype=int)
+        else:
+            pts = np.asarray(edge_cells[int(cell_idx - num_nodes)], dtype=int)
+        if pts.size > 0:
+            pieces.append(pts)
+
+    if not pieces:
+        return np.empty(0, dtype=int)
+    return np.unique(np.concatenate(pieces))
+
+
+def enumerate_terminal_cellular_trajectories(simplified_graph):
+    """
+    Enumerate edge-simple terminal trajectories on the simplified graph.
+
+    A terminal node is any simplified node with multigraph degree not equal
+    to 2. Trajectories are simple paths between terminal nodes, plus simple
+    loops that start and end at the same terminal node.
+
+    Returns
+    -------
+    list of dict
+        Each trajectory dictionary contains:
+        - node_path
+        - edge_path
+        - cell_indices
+        - graph_length
+        - num_points (when cellular decomposition is available)
+    """
+    nodes = simplified_graph["nodes"]
+    edges = simplified_graph["edges"]
+    num_nodes = len(nodes)
+
+    adj = [[] for _ in range(num_nodes)]
+    degree = np.zeros(num_nodes, dtype=int)
+    for edge_id, (u, v) in enumerate(edges):
+        u = int(u)
+        v = int(v)
+        adj[u].append((v, edge_id))
+        adj[v].append((u, edge_id))
+        if u == v:
+            degree[u] += 2
+        else:
+            degree[u] += 1
+            degree[v] += 1
+
+    terminal_nodes = [int(i) for i in range(num_nodes) if degree[i] != 2]
+    if not terminal_nodes and num_nodes > 0:
+        terminal_nodes = list(range(num_nodes))
+
+    edge_lengths = simplified_graph.get("edge_lengths")
+
+    def graph_length(edge_path):
+        if edge_lengths is None:
+            return float(len(edge_path))
+        return float(sum(float(edge_lengths[int(eid)]) for eid in edge_path))
+
+    def to_cell_indices(node_path, edge_path):
+        cell_indices = []
+        edge_offset = num_nodes
+        for idx, node_id in enumerate(node_path):
+            cell_indices.append(int(node_id))
+            if idx < len(edge_path):
+                cell_indices.append(edge_offset + int(edge_path[idx]))
+        return cell_indices
+
+    trajectories = []
+    seen = set()
+
+    def add_trajectory(node_path, edge_path):
+        edge_key = tuple(int(e) for e in edge_path)
+        rev_key = tuple(reversed(edge_key))
+        key = min(edge_key, rev_key)
+        if key in seen:
+            return
+        seen.add(key)
+
+        record = {
+            "node_path": [int(x) for x in node_path],
+            "edge_path": [int(x) for x in edge_path],
+            "cell_indices": to_cell_indices(node_path, edge_path),
+            "graph_length": graph_length(edge_path),
+        }
+        if "node_cells" in simplified_graph and "edge_cells" in simplified_graph:
+            points = extract_cellular_trajectory(simplified_graph, record["cell_indices"])
+            record["num_points"] = int(points.size)
+        trajectories.append(record)
+
+    def dfs(start, current, node_path, edge_path, visited_edges, visited_nodes):
+        for nxt, edge_id in adj[current]:
+            edge_id = int(edge_id)
+            nxt = int(nxt)
+            if edge_id in visited_edges:
+                continue
+
+            if nxt == start and len(edge_path) >= 1:
+                add_trajectory(node_path + [start], edge_path + [edge_id])
+                continue
+
+            if nxt in visited_nodes:
+                continue
+
+            next_node_path = node_path + [nxt]
+            next_edge_path = edge_path + [edge_id]
+            next_visited_edges = visited_edges | {edge_id}
+            next_visited_nodes = visited_nodes | {nxt}
+
+            if nxt in terminal_nodes and nxt != start:
+                add_trajectory(next_node_path, next_edge_path)
+
+            dfs(
+                start,
+                nxt,
+                next_node_path,
+                next_edge_path,
+                next_visited_edges,
+                next_visited_nodes,
+            )
+
+    for start in terminal_nodes:
+        dfs(
+            start=int(start),
+            current=int(start),
+            node_path=[int(start)],
+            edge_path=[],
+            visited_edges=set(),
+            visited_nodes={int(start)},
+        )
+
+    trajectories.sort(
+        key=lambda item: (
+            -float(item["graph_length"]),
+            -int(item.get("num_points", 0)),
+            tuple(item["cell_indices"]),
+        )
+    )
+    return trajectories
 
 
 def simplify_reeb_graph(reeb_nodes, reeb_edges, return_paths=False):
@@ -271,45 +593,132 @@ def assign_points_to_raw_edges(
 
 
 def assign_points_to_simplified_edges(
+    W,
+    reeb_nodes,
+    keep_ids,
+    simp_edges,
     simp_edge_paths,
+    simp_node_paths,
     raw_edge_points,
+    step_vertices,
+    step_comp_ids,
+    uniq_v,
     num_points,
 ):
     """
-    Aggregate raw edge point assignments onto simplified edges.
+    Compute simplified-edge support and ownership.
 
     Parameters
     ----------
+    W : scipy.sparse matrix
+        Affinity matrix on the original points.
+    reeb_nodes : list of dict
+        Raw Reeb nodes from build_reeb_graph.
+    keep_ids : np.ndarray
+        Raw node ids kept after simplification.
+    simp_edges : list of tuple
+        Simplified edge list.
     simp_edge_paths : list of list of int
         Raw edge ids underlying each simplified edge.
+    simp_node_paths : list of list of int
+        Raw node ids encountered along each simplified edge path.
     raw_edge_points : list of np.ndarray
         Point indices per raw edge.
+    step_vertices : list of np.ndarray
+        Per-slice active vertex indices (compact).
+    step_comp_ids : list of np.ndarray
+        Per-slice component IDs per active vertex.
+    uniq_v : np.ndarray
+        Mapping from compacted vertex indices to original point indices.
     num_points : int
         Number of points in the original dataset.
 
     Returns
     -------
-    point_edges : list of np.ndarray
-        For each point, the simplified edge ids it belongs to.
+    point_edge_assignment : np.ndarray
+        One simplified edge id per point.
     edge_points : list of np.ndarray
-        For each simplified edge, the point indices assigned to that edge.
+        Ownership partition of points per simplified edge.
+    point_edges : list of np.ndarray
+        Overlapping simplified-edge support memberships per point.
+    edge_support_points : list of np.ndarray
+        Inherited support points per simplified edge.
     """
-    edge_points = []
-    point_edges_accum = [[] for _ in range(int(num_points))]
+    raw_node_points = _compute_raw_node_supports(
+        reeb_nodes=reeb_nodes,
+        step_vertices=step_vertices,
+        step_comp_ids=step_comp_ids,
+        uniq_v=uniq_v,
+    )
 
-    for simp_eid, raw_path in enumerate(simp_edge_paths):
-        if len(raw_path) == 0:
-            pts = np.empty(0, dtype=int)
+    edge_support_points = []
+    for raw_path, node_path in zip(simp_edge_paths, simp_node_paths):
+        pieces = []
+        for raw_eid in raw_path:
+            pts = np.asarray(raw_edge_points[int(raw_eid)], dtype=int)
+            if pts.size > 0:
+                pieces.append(pts)
+
+        for raw_nid in node_path[1:-1]:
+            pts = np.asarray(raw_node_points[int(raw_nid)], dtype=int)
+            if pts.size > 0:
+                pieces.append(pts)
+
+        if pieces:
+            pts = np.unique(np.concatenate(pieces))
         else:
-            pts = np.unique(
-                np.concatenate([raw_edge_points[int(raw_eid)] for raw_eid in raw_path])
-            )
-        edge_points.append(pts)
-        for p in pts:
-            point_edges_accum[int(p)].append(int(simp_eid))
+            endpoint_pieces = []
+            for raw_nid in node_path:
+                pts = np.asarray(raw_node_points[int(raw_nid)], dtype=int)
+                if pts.size > 0:
+                    endpoint_pieces.append(pts)
+            if endpoint_pieces:
+                pts = np.unique(np.concatenate(endpoint_pieces))
+            else:
+                pts = np.empty(0, dtype=int)
+        edge_support_points.append(pts)
 
-    point_edges = [np.array(ids, dtype=int) for ids in point_edges_accum]
-    return point_edges, edge_points
+    point_edges = _build_point_memberships(edge_support_points, num_points)
+    cost_graph = _build_symmetrized_diffusion_cost_graph(W)
+    edge_distances = _multi_source_distances(cost_graph, edge_support_points)
+
+    raw2simp = -np.ones(len(reeb_nodes), dtype=int)
+    for simp_nid, raw_nid in enumerate(np.asarray(keep_ids, dtype=int)):
+        raw2simp[int(raw_nid)] = int(simp_nid)
+
+    incident_edges = [[] for _ in range(len(keep_ids))]
+    for edge_id, (u, v) in enumerate(simp_edges):
+        incident_edges[int(u)].append(int(edge_id))
+        if int(v) != int(u):
+            incident_edges[int(v)].append(int(edge_id))
+
+    point_candidates = [[] for _ in range(int(num_points))]
+    for point_id, support_ids in enumerate(point_edges):
+        if support_ids.size > 0:
+            point_candidates[point_id] = support_ids.tolist()
+
+    for raw_nid, support_pts in enumerate(raw_node_points):
+        simp_nid = raw2simp[int(raw_nid)]
+        if simp_nid < 0:
+            continue
+        candidates = incident_edges[int(simp_nid)]
+        if not candidates:
+            continue
+        for point_id in np.asarray(support_pts, dtype=int):
+            if not point_candidates[int(point_id)]:
+                point_candidates[int(point_id)] = list(candidates)
+
+    point_edge_assignment = _partition_from_distances(
+        edge_distances,
+        candidate_ids=point_candidates,
+    )
+    unresolved = np.flatnonzero(point_edge_assignment < 0)
+    if unresolved.size > 0:
+        fallback_assignment = _partition_from_distances(edge_distances)
+        point_edge_assignment[unresolved] = fallback_assignment[unresolved]
+
+    edge_points = _assignment_to_point_lists(point_edge_assignment, len(simp_edge_paths))
+    return point_edge_assignment, edge_points, point_edges, edge_support_points
 
 
 def assign_points_to_raw_nodes(
@@ -419,27 +828,17 @@ def assign_points_to_raw_nodes(
 
 
 def assign_points_to_simplified_nodes(
+    W,
     reeb_nodes,
     keep_ids,
     simp_node_paths,
     step_vertices,
     step_comp_ids,
     uniq_v,
-    filter_values,
-    t_vals,
-    chunk_size=100000,
 ):
     """
-    Assign points to simplified nodes using contracted raw-graph paths.
-
-    Strategy:
-    1) Points belonging to kept raw Reeb nodes are assigned to that
-       simplified node.
-    2) Points belonging to contracted raw nodes are assigned to the
-       nearest kept endpoint along the simplified edge path that absorbed
-       that raw node.
-    3) Any remaining points fall back to the closest kept node in
-       filter space |f(x) - t_vals[step]|.
+    Assign points to simplified nodes via graph Voronoi on the
+    symmetrized diffusion metric.
 
     Parameters
     ----------
@@ -456,13 +855,6 @@ def assign_points_to_simplified_nodes(
         Per-slice component IDs per active vertex
     uniq_v : np.ndarray
         Mapping from compacted vertex indices to original point indices
-    filter_values : np.ndarray, shape (N,)
-        Filter values for all points
-    t_vals : np.ndarray, shape (S,)
-        Midpoint filter values per slice from prepare_reeb
-    chunk_size : int, optional
-        Chunk size for assigning remaining points
-
     Returns
     -------
     point_assignment : np.ndarray, shape (N,)
@@ -472,22 +864,8 @@ def assign_points_to_simplified_nodes(
     node_support_points : list of np.ndarray
         Intrinsic support points for the kept simplified nodes only.
     """
-    N = int(filter_values.shape[0])
-    point_assignment = -np.ones(N, dtype=int)
-    best_dist = np.full(N, np.inf, dtype=float)
-
     if keep_ids.size == 0:
-        return point_assignment, [], []
-
-    raw2simp = -np.ones(len(reeb_nodes), dtype=int)
-    for new_id, old_id in enumerate(keep_ids):
-        raw2simp[int(old_id)] = new_id
-
-    # Precompute filter value per kept node for the fallback step only.
-    keep_node_f = np.empty(len(keep_ids), dtype=float)
-    for new_id, old_id in enumerate(keep_ids):
-        s = reeb_nodes[int(old_id)]["step"]
-        keep_node_f[new_id] = float(t_vals[int(s)])
+        return -np.ones(W.shape[0], dtype=int), [], []
 
     raw_node_points = _compute_raw_node_supports(
         reeb_nodes=reeb_nodes,
@@ -496,63 +874,8 @@ def assign_points_to_simplified_nodes(
         uniq_v=uniq_v,
     )
     node_support_points = [raw_node_points[int(old_id)] for old_id in keep_ids]
-    f = np.asarray(filter_values, dtype=float)
-
-    # 1) Assign points from kept raw nodes directly.
-    for old_id in keep_ids:
-        old_id = int(old_id)
-        new_id = raw2simp[old_id]
-        pts = raw_node_points[old_id]
-        if pts.size == 0:
-            continue
-        point_assignment[pts] = new_id
-        best_dist[pts] = 0.0
-
-    # 2) Reassign contracted raw-node supports by nearest endpoint along
-    # the contracted raw-node path.
-    for node_path in simp_node_paths:
-        if len(node_path) < 3:
-            continue
-        left_old = int(node_path[0])
-        right_old = int(node_path[-1])
-        left_new = raw2simp[left_old]
-        right_new = raw2simp[right_old]
-        if left_new < 0 or right_new < 0:
-            continue
-
-        if left_new == right_new:
-            for old_id in node_path[1:-1]:
-                pts = raw_node_points[int(old_id)]
-                if pts.size > 0:
-                    point_assignment[pts] = left_new
-                    best_dist[pts] = 0.0
-            continue
-
-        last_idx = len(node_path) - 1
-        for idx, old_id in enumerate(node_path[1:-1], start=1):
-            pts = raw_node_points[int(old_id)]
-            if pts.size == 0:
-                continue
-            left_steps = idx
-            right_steps = last_idx - idx
-            target = left_new if left_steps <= right_steps else right_new
-            point_assignment[pts] = target
-            best_dist[pts] = 0.0
-
-    # 3) Assign remaining points by nearest kept node in filter space.
-    unassigned = np.flatnonzero(point_assignment == -1)
-    if unassigned.size > 0:
-        K = keep_node_f.shape[0]
-        for i in range(0, unassigned.size, chunk_size):
-            idx = unassigned[i:i + chunk_size]
-            # compute argmin |f(x) - keep_node_f|
-            dist = np.abs(f[idx][:, None] - keep_node_f[None, :])
-            best = np.argmin(dist, axis=1)
-            point_assignment[idx] = best
-
-    # build per-node point lists
-    node_points = []
-    for k in range(len(keep_ids)):
-        node_points.append(np.flatnonzero(point_assignment == k))
-
+    cost_graph = _build_symmetrized_diffusion_cost_graph(W)
+    node_distances = _multi_source_distances(cost_graph, node_support_points)
+    point_assignment = _partition_from_distances(node_distances)
+    node_points = _assignment_to_point_lists(point_assignment, len(keep_ids))
     return point_assignment, node_points, node_support_points
