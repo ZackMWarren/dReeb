@@ -1,7 +1,7 @@
 import numpy as np
 
-from .graph import build_affinity_matrix, build_diffusion_operator
-from .filter import find_endpoints, compute_filter
+from .graph import build_affinity_matrix
+from .filter import compute_diffusion_filter
 from .reeb import prepare_reeb, build_reeb_graph
 from .persistence import compute_edge_lengths, compute_graph_persistence
 from .simplify import (
@@ -17,6 +17,7 @@ def dreeb(
     X,
     k=80,
     precision=1.0,
+    diffusion_eigen_index=1,
     simplify=True,
     return_raw=False,
     return_edge_lengths=False,
@@ -38,6 +39,10 @@ def dreeb(
     precision : float, optional (default: 1.0)
         Controls filter quantization. 1.0 = no quantization,
         0.1 = 10% of unique levels
+    diffusion_eigen_index : int, optional (default: 1)
+        One-based index of the nontrivial diffusion eigenfunction to use
+        per connected component. `1` means the first nontrivial
+        diffusion eigenfunction, `2` the second, and so on.
     simplify : bool, optional (default: True)
         If True, simplify the Reeb graph by contracting degree-2 chains.
     return_raw : bool, optional (default: False)
@@ -73,11 +78,12 @@ def dreeb(
         - intermediates : intermediate construction outputs, when requested
     """
     W = build_affinity_matrix(X, k=k)
-    P = build_diffusion_operator(W)
-    components, roots_A, roots_B, cost, diameters = find_endpoints(P)
-    filter_values, distA, distB = compute_filter(
-        P, cost, components, roots_A, roots_B, precision=precision
+    filter_values, components, diffusion_eigenvalues = compute_diffusion_filter(
+        W,
+        diffusion_eigen_index=diffusion_eigen_index,
+        precision=precision,
     )
+
     prep_state = prepare_reeb(W, filter_values)
     reeb_nodes, reeb_edges, step_vertices, step_comp_ids = build_reeb_graph(prep_state)
     t_vals = prep_state["t_vals"]
@@ -93,8 +99,15 @@ def dreeb(
     raw_edge_points = None
 
     if simplify:
-        if return_edge_assignment:
-            simp_edges, keep_ids, beta1, comp_count, simp_edge_paths = simplify_reeb_graph(
+        if return_edge_assignment or return_point_assignment:
+            (
+                simp_edges,
+                keep_ids,
+                beta1,
+                comp_count,
+                simp_edge_paths,
+                simp_node_paths,
+            ) = simplify_reeb_graph(
                 reeb_nodes, reeb_edges, return_paths=True
             )
         else:
@@ -123,9 +136,10 @@ def dreeb(
             )
 
         if return_point_assignment:
-            point_assignment, node_points = assign_points_to_simplified_nodes(
+            point_assignment, node_points, node_support_points = assign_points_to_simplified_nodes(
                 reeb_nodes=reeb_nodes,
                 keep_ids=keep_ids,
+                simp_node_paths=simp_node_paths,
                 step_vertices=step_vertices,
                 step_comp_ids=step_comp_ids,
                 uniq_v=prep_state["uniq_v"],
@@ -134,6 +148,7 @@ def dreeb(
             )
             simp_section["point_assignment"] = point_assignment
             simp_section["node_points"] = node_points
+            simp_section["node_support_points"] = node_support_points
 
         if return_edge_assignment:
             raw_point_edges, raw_edge_points = assign_points_to_raw_edges(
@@ -192,7 +207,7 @@ def dreeb(
             )
 
         if return_point_assignment:
-            point_assignment, node_points = assign_points_to_raw_nodes(
+            point_assignment, node_points, node_support_points = assign_points_to_raw_nodes(
                 reeb_nodes=reeb_nodes,
                 step_vertices=step_vertices,
                 step_comp_ids=step_comp_ids,
@@ -202,6 +217,7 @@ def dreeb(
             )
             raw_section["point_assignment"] = point_assignment
             raw_section["node_points"] = node_points
+            raw_section["node_support_points"] = node_support_points
 
         if return_edge_assignment:
             raw_point_edges, raw_edge_points = assign_points_to_raw_edges(
@@ -254,14 +270,10 @@ def dreeb(
     if return_intermediates:
         result["intermediates"] = {
             "W": W,
-            "P": P,
             "components": components,
-            "roots_A": roots_A,
-            "roots_B": roots_B,
-            "diameters": diameters,
+            "diffusion_eigen_index": int(diffusion_eigen_index),
+            "diffusion_eigenvalues": diffusion_eigenvalues,
             "filter_values": filter_values,
-            "distA": distA,
-            "distB": distB,
             "prep_state": prep_state,
             "step_vertices": step_vertices,
             "step_comp_ids": step_comp_ids,

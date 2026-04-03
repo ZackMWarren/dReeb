@@ -6,15 +6,23 @@ The main entrypoint is `dreeb.dreeb()`. By default it returns the simplified
 graph only and skips optional work such as persistence, point assignment, edge
 assignment, and large intermediate outputs.
 
+The scalar filter is the first nontrivial diffusion eigenfunction computed
+separately on each connected component of the affinity graph. You can choose a
+later nontrivial eigenfunction with `diffusion_eigen_index`.
+
 ## Installation
 
-Core package:
+Install with pip:
 
 ```bash
-pip install .
+pip install dreeb
 ```
 
-Visualization requires `matplotlib` and `networkx`.
+After installation, both the main pipeline and plotting are available directly:
+
+```python
+from dreeb import dreeb, plot_dreeb
+```
 
 ## Quickstart
 
@@ -48,6 +56,24 @@ nodes = raw["nodes"]
 edges = raw["edges"]
 ```
 
+If you want to plot the result, request the raw graph and intermediates:
+
+```python
+from dreeb import dreeb, plot_dreeb
+
+result = dreeb(X, return_raw=True, return_intermediates=True)
+
+fig, node_pos = plot_dreeb(
+    pts=embedding_2d,
+    simp_edges=result["simplified"]["edges"],
+    keep_ids=result["simplified"]["keep_ids"],
+    reeb_nodes=result["raw"]["nodes"],
+    step_vertices=result["intermediates"]["step_vertices"],
+    step_comp_ids=result["intermediates"]["step_comp_ids"],
+    uniq_v=result["intermediates"]["prep_state"]["uniq_v"],
+)
+```
+
 ## Result Structure
 
 `dreeb()` returns a structured dictionary with stable top-level keys:
@@ -65,6 +91,7 @@ stays stable.
 ```python
 result = dreeb(
     X,
+    diffusion_eigen_index=1,
     return_raw=True,
     return_edge_lengths=True,
     return_simp_persistence=True,
@@ -77,6 +104,9 @@ result = dreeb(
 
 - `return_raw=True`
   Include the raw graph under `result["raw"]`.
+- `diffusion_eigen_index=1`
+  Use the first nontrivial diffusion eigenfunction. Set `2`, `3`, ... to use
+  later nontrivial diffusion eigenfunctions.
 - `return_edge_lengths=True`
   Return filter-space edge lengths in the graph sections that are present.
 - `return_simp_persistence=True`
@@ -109,6 +139,12 @@ result = dreeb(X, return_simp_persistence=True)
 h1 = result["simplified"]["persistence"]["h1"]
 ```
 
+Use the second nontrivial diffusion eigenfunction:
+
+```python
+result = dreeb(X, diffusion_eigen_index=2)
+```
+
 Simplified graph plus node assignment:
 
 ```python
@@ -116,6 +152,7 @@ result = dreeb(X, return_point_assignment=True)
 
 point_assignment = result["simplified"]["point_assignment"]
 node_points = result["simplified"]["node_points"]
+node_support_points = result["simplified"]["node_support_points"]
 ```
 
 Simplified graph plus edge assignment:
@@ -139,11 +176,22 @@ raw_pd = result["raw"]["persistence"]
 
 Point assignment is opt-in via `return_point_assignment=True`.
 
+There are two related but different node-level outputs:
+
+- `node_points`: an ownership partition, one simplified/raw node id per point
+- `node_support_points`: the intrinsic local support of each node
+
+If you want the points supporting a trajectory through the simplified graph,
+use `edge_points` together with a graph path in `result["simplified"]["edges"]`
+and take the union of the edge supports along that path.
+
 When `simplify=True`:
 
 - points already belonging to kept raw nodes are assigned to the corresponding
   simplified node
-- remaining points are assigned to the closest kept node in filter space
+- points belonging to contracted raw nodes are reassigned to the nearest kept
+  endpoint along the contracted raw-graph path behind that simplified edge
+- any remaining points fall back to the closest kept node in filter space
 
 When `simplify=False`:
 
@@ -152,7 +200,8 @@ When `simplify=False`:
 Returned fields:
 
 - `point_assignment`: node index per point
-- `node_points`: list of point index arrays per node
+- `node_points`: ownership partition of points per node
+- `node_support_points`: intrinsic support points per node
 
 ## Edge Assignment
 
@@ -217,16 +266,16 @@ edge-weighted graph itself.
 
 ## Plotting
 
-`plot_reeb()` overlays the simplified graph on a 2D or 3D embedding that you
-compute separately.
+`plot_dreeb()` overlays the simplified graph on a 2D or 3D embedding that you
+compute separately. It works with the standard package install; there is no
+separate plotting extra or second install step.
 
 ```python
-from dreeb import dreeb
-from dreeb.visualize import plot_reeb
+from dreeb import dreeb, plot_dreeb
 
 result = dreeb(X, return_raw=True, return_intermediates=True)
 
-fig, node_pos = plot_reeb(
+fig, node_pos = plot_dreeb(
     pts=embedding_2d,
     simp_edges=result["simplified"]["edges"],
     keep_ids=result["simplified"]["keep_ids"],
@@ -247,7 +296,7 @@ Practical notes:
 
 ## Index Alignment
 
-`plot_reeb()` assumes the embedding array `pts` is aligned row-for-row with the
+`plot_dreeb()` assumes the embedding array `pts` is aligned row-for-row with the
 original data matrix `X` passed to `dreeb()`.
 
 How node membership is recovered for plotting:

@@ -9,7 +9,7 @@ import numpy as np
 import phate
 
 from dreeb import dreeb
-from dreeb.visualize import plot_reeb
+from dreeb.visualize import plot_dreeb
 
 
 def sample_torus(n=800, R=2.0, r=0.7, seed=0):
@@ -44,7 +44,7 @@ def run_torus_demo(output_path="artifacts/torus_phate_reeb.png"):
     raw = result["raw"]
     intermediates = result["intermediates"]
 
-    fig, _ = plot_reeb(
+    fig, _ = plot_dreeb(
         pts=pts,
         simp_edges=simplified["edges"],
         keep_ids=simplified["keep_ids"],

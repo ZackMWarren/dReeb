@@ -4,8 +4,7 @@ try:
     from matplotlib.patches import FancyArrowPatch
 except ImportError:
     raise ImportError(
-        "Visualization requires matplotlib and networkx. "
-        "Install with: pip install dreeb[visualize]"
+        "Visualization requires matplotlib and networkx."
     )
 
 import numpy as np
@@ -33,7 +32,60 @@ def _parallel_edge_radii(count, base=0.18):
     return (base * offsets).tolist()
 
 
-def plot_reeb(
+def _orthonormal_basis_3d(direction):
+    """
+    Build two unit vectors orthogonal to the given 3D direction.
+    """
+    direction = np.asarray(direction, dtype=float)
+    norm = np.linalg.norm(direction)
+    if norm < 1e-12:
+        return np.array([1.0, 0.0, 0.0]), np.array([0.0, 1.0, 0.0])
+
+    tangent = direction / norm
+    trial = np.array([0.0, 0.0, 1.0])
+    if abs(np.dot(tangent, trial)) > 0.9:
+        trial = np.array([0.0, 1.0, 0.0])
+
+    normal_1 = np.cross(tangent, trial)
+    normal_1 /= (np.linalg.norm(normal_1) + 1e-12)
+    normal_2 = np.cross(tangent, normal_1)
+    normal_2 /= (np.linalg.norm(normal_2) + 1e-12)
+    return normal_1, normal_2
+
+
+def _arc_points_3d(p0, p1, rad, span_scale, num=80):
+    """
+    Quadratic Bezier-style arc between two 3D points.
+    """
+    p0 = np.asarray(p0, dtype=float)
+    p1 = np.asarray(p1, dtype=float)
+    chord = p1 - p0
+    chord_len = np.linalg.norm(chord)
+    if chord_len < 1e-12:
+        return np.repeat(p0[None, :], num, axis=0)
+
+    n1, n2 = _orthonormal_basis_3d(chord)
+    midpoint = 0.5 * (p0 + p1)
+    control = midpoint + (rad * span_scale) * n1 + (0.35 * abs(rad) * span_scale) * n2
+
+    t = np.linspace(0.0, 1.0, num)[:, None]
+    return ((1.0 - t) ** 2) * p0 + 2.0 * (1.0 - t) * t * control + (t ** 2) * p1
+
+
+def _loop_points_3d(center, radius, basis_u, basis_v, num=100):
+    """
+    Circle embedded in 3D using a local 2D basis.
+    """
+    theta = np.linspace(0.0, 2.0 * np.pi, num)
+    center = np.asarray(center, dtype=float)
+    return (
+        center[None, :]
+        + radius * np.cos(theta)[:, None] * basis_u[None, :]
+        + radius * np.sin(theta)[:, None] * basis_v[None, :]
+    )
+
+
+def plot_dreeb(
     pts,
     simp_edges,
     keep_ids,
@@ -220,46 +272,38 @@ def plot_reeb(
         fig = plt.figure(figsize=figsize)
         ax = fig.add_subplot(111, projection="3d")
         ax.scatter(pts[:, 0], pts[:, 1], pts[:, 2],
-                   s=2, alpha=0.03, color="gray")
+                   s=3, alpha=0.15, color="gray")
 
-        base_scale = 0.03 * span
-
-        def _offset_3d(p0, p1, k, m):
-            d = p1 - p0
-            if np.allclose(d, 0):
-                return p0, p1
-            perp = np.array([-d[1], d[0], 0.0]) if (abs(d[0]) > 1e-9 or abs(d[1]) > 1e-9) \
-                   else np.array([1.0, 0.0, 0.0])
-            perp /= (np.linalg.norm(perp) + 1e-12)
-            off = ((k - (m - 1) / 2.0) * base_scale) * perp
-            return p0 + off, p1 + off
+        arc_base = 0.28 * span
 
         for (a, b), elist in pair_to_edges.items():
             p0, p1 = node_pos[a], node_pos[b]
             m = len(elist)
             is_cyc = pair_is_cycle[(a, b)]
             col = (cycle_color if (color_cycles and is_cyc) else noncycle_color)
-            for k in range(m):
-                q0, q1 = _offset_3d(p0, p1, k, m)
-                ax.plot([q0[0], q1[0]], [q0[1], q1[1]], [q0[2], q1[2]],
-                        color=col, linewidth=1.2, alpha=0.95)
+            radii = _parallel_edge_radii(m, base=0.9)
+            line_width = 1.4 if m == 1 else 1.2
+            for rad in radii:
+                curve = _arc_points_3d(p0, p1, rad=rad, span_scale=arc_base, num=90)
+                ax.plot(curve[:, 0], curve[:, 1], curve[:, 2],
+                        color=col, linewidth=line_width, alpha=0.95)
 
         # self-loops
-        theta = np.linspace(0, 2 * np.pi, 60)
         for u, count in loop_counts.items():
-            cx, cy, cz = node_pos[u]
-            base_r = 0.015 * span
+            center = node_pos[u]
+            local_dir = center - pts.mean(axis=0)
+            basis_u, basis_v = _orthonormal_basis_3d(local_dir)
+            base_r = 0.02 * span
             for i in range(count):
                 r = base_r * (1 + 0.4 * i)
                 col = cycle_color if color_cycles else noncycle_color
-                ax.plot(cx + r * np.cos(theta),
-                        cy + r * np.sin(theta),
-                        cz + 0 * theta,
+                loop = _loop_points_3d(center, r, basis_u, basis_v, num=120)
+                ax.plot(loop[:, 0], loop[:, 1], loop[:, 2],
                         color=col, linewidth=1.0, alpha=0.9)
 
         ax.scatter(node_pos[:, 0], node_pos[:, 1], node_pos[:, 2],
-                   s=35, c="gold", edgecolors="black",
-                   linewidths=0.8, depthshade=False)
+                   s=55, c="gold", edgecolors="black",
+                   linewidths=0.9, depthshade=False)
 
         if label_degree:
             for i in range(simp_num_nodes):
@@ -271,8 +315,18 @@ def plot_reeb(
         ax.set_xlabel("Embedding dim 1")
         ax.set_ylabel("Embedding dim 2")
         ax.set_zlabel("Embedding dim 3")
+        ax.set_box_aspect(np.ptp(pts, axis=0) + 1e-12)
+        ax.view_init(elev=20, azim=-58)
 
     plt.tight_layout()
-    plt.show()
+    if "agg" not in plt.get_backend().lower():
+        plt.show()
 
     return fig, node_pos
+
+
+def plot_reeb(*args, **kwargs):
+    """
+    Backward-compatible alias for plot_dreeb().
+    """
+    return plot_dreeb(*args, **kwargs)

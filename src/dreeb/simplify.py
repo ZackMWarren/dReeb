@@ -3,6 +3,32 @@ import scipy.sparse as sp
 from scipy.sparse.csgraph import connected_components
 
 
+def _compute_raw_node_supports(
+    reeb_nodes,
+    step_vertices,
+    step_comp_ids,
+    uniq_v,
+):
+    """
+    Recover the original point indices supporting each raw Reeb node.
+    """
+    uniq_v_arr = np.asarray(uniq_v, dtype=int)
+    node_points = []
+    for info in reeb_nodes:
+        s = int(info["step"])
+        c = int(info["comp"])
+        vs = step_vertices[s]
+        cs = step_comp_ids[s]
+        if vs.size == 0:
+            node_points.append(np.empty(0, dtype=int))
+            continue
+        comp_vs = vs[cs == c]
+        if comp_vs.size == 0:
+            comp_vs = vs
+        node_points.append(np.unique(uniq_v_arr[comp_vs]))
+    return node_points
+
+
 def simplify_reeb_graph(reeb_nodes, reeb_edges, return_paths=False):
     """
     Simplify Reeb graph by contracting degree-2 chains and compute β1.
@@ -30,14 +56,17 @@ def simplify_reeb_graph(reeb_nodes, reeb_edges, return_paths=False):
         First Betti number (number of independent cycles)
     comp_count : int
         Number of connected components in simplified graph
-    simp_edge_paths : list of list of int, optional
+        simp_edge_paths : list of list of int, optional
         Raw edge ids underlying each simplified edge. Returned only when
         `return_paths=True`.
+    simp_node_paths : list of list of int, optional
+        Raw node ids encountered along each simplified edge path, including
+        endpoints. Returned only when `return_paths=True`.
     """
     num_nodes = len(reeb_nodes)
     if num_nodes == 0:
         if return_paths:
-            return [], np.array([]), 0, 0, []
+            return [], np.array([]), 0, 0, [], []
         return [], np.array([]), 0, 0
 
     # build adjacency with raw edge ids preserved
@@ -61,6 +90,7 @@ def simplify_reeb_graph(reeb_nodes, reeb_edges, return_paths=False):
     visited_mid = np.zeros(num_nodes, dtype=bool)
     simp_edges = []
     simp_edge_paths = []
+    simp_node_paths = []
 
     for u_old in keep_ids:
         u_new = old2new[u_old]
@@ -70,11 +100,13 @@ def simplify_reeb_graph(reeb_nodes, reeb_edges, return_paths=False):
                 if u_old < v_old:
                     simp_edges.append((u_new, v_new))
                     simp_edge_paths.append([int(eid0)])
+                    simp_node_paths.append([int(u_old), int(v_old)])
                 continue
             if (not keep[v_old]) and deg[v_old] == 2 and not visited_mid[v_old]:
                 prev = u_old
                 curr = v_old
                 path = [int(eid0)]
+                node_path = [int(u_old), int(v_old)]
                 visited_mid[curr] = True
                 while True:
                     nbrs = adj[curr]
@@ -85,6 +117,7 @@ def simplify_reeb_graph(reeb_nodes, reeb_edges, return_paths=False):
                         nxt, next_eid = n1, e1
                     path.append(int(next_eid))
                     prev, curr = curr, nxt
+                    node_path.append(int(curr))
                     if keep[curr]:
                         v_new = old2new[curr]
                         if u_new != v_new:
@@ -92,6 +125,7 @@ def simplify_reeb_graph(reeb_nodes, reeb_edges, return_paths=False):
                         else:
                             simp_edges.append((u_new, u_new))
                         simp_edge_paths.append(path.copy())
+                        simp_node_paths.append(node_path.copy())
                         break
                     if deg[curr] != 2 or visited_mid[curr]:
                         break
@@ -125,7 +159,7 @@ def simplify_reeb_graph(reeb_nodes, reeb_edges, return_paths=False):
     beta1 = simp_num_edges - simp_num_nodes + comp_count
 
     if return_paths:
-        return simp_edges, keep_ids, beta1, comp_count, simp_edge_paths
+        return simp_edges, keep_ids, beta1, comp_count, simp_edge_paths, simp_node_paths
 
     return simp_edges, keep_ids, beta1, comp_count
 
@@ -167,22 +201,13 @@ def assign_points_to_raw_edges(
         W = sp.csr_matrix(W)
     A = ((W + W.T) > 0).astype(np.int8).tocsr()
 
-    uniq_v_arr = np.asarray(uniq_v, dtype=int)
     level_of = np.asarray(level_of, dtype=int)
-
-    node_points = []
-    for info in reeb_nodes:
-        s = int(info["step"])
-        c = int(info["comp"])
-        vs = step_vertices[s]
-        cs = step_comp_ids[s]
-        if vs.size == 0:
-            node_points.append(np.empty(0, dtype=int))
-            continue
-        comp_vs = vs[cs == c]
-        if comp_vs.size == 0:
-            comp_vs = vs
-        node_points.append(np.unique(uniq_v_arr[comp_vs]))
+    node_points = _compute_raw_node_supports(
+        reeb_nodes=reeb_nodes,
+        step_vertices=step_vertices,
+        step_comp_ids=step_comp_ids,
+        uniq_v=uniq_v,
+    )
 
     edges_by_step = {}
     for eid, (u, v) in enumerate(reeb_edges):
@@ -327,17 +352,26 @@ def assign_points_to_raw_nodes(
     point_assignment : np.ndarray, shape (N,)
         Raw node index for each point (-1 if no nodes)
     node_points : list of np.ndarray
-        List of point index arrays per raw node
+        Ownership partition of points per raw node.
+    node_support_points : list of np.ndarray
+        Intrinsic support points per raw node recovered from the raw
+        Reeb slices.
     """
     N = int(filter_values.shape[0])
     point_assignment = -np.ones(N, dtype=int)
     best_dist = np.full(N, np.inf, dtype=float)
 
     if len(reeb_nodes) == 0:
-        return point_assignment, []
+        return point_assignment, [], []
 
     uniq_v_arr = np.asarray(uniq_v, dtype=int)
     f = np.asarray(filter_values, dtype=float)
+    node_support_points = _compute_raw_node_supports(
+        reeb_nodes=reeb_nodes,
+        step_vertices=step_vertices,
+        step_comp_ids=step_comp_ids,
+        uniq_v=uniq_v,
+    )
 
     # Precompute filter value per raw node
     node_f = np.empty(len(reeb_nodes), dtype=float)
@@ -381,12 +415,13 @@ def assign_points_to_raw_nodes(
     for k in range(len(reeb_nodes)):
         node_points.append(np.flatnonzero(point_assignment == k))
 
-    return point_assignment, node_points
+    return point_assignment, node_points, node_support_points
 
 
 def assign_points_to_simplified_nodes(
     reeb_nodes,
     keep_ids,
+    simp_node_paths,
     step_vertices,
     step_comp_ids,
     uniq_v,
@@ -395,12 +430,15 @@ def assign_points_to_simplified_nodes(
     chunk_size=100000,
 ):
     """
-    Assign points to simplified nodes by filter-distance.
+    Assign points to simplified nodes using contracted raw-graph paths.
 
     Strategy:
     1) Points belonging to kept raw Reeb nodes are assigned to that
-       simplified node (ties broken by closer filter distance).
-    2) Any remaining points are assigned to the closest kept node in
+       simplified node.
+    2) Points belonging to contracted raw nodes are assigned to the
+       nearest kept endpoint along the simplified edge path that absorbed
+       that raw node.
+    3) Any remaining points fall back to the closest kept node in
        filter space |f(x) - t_vals[step]|.
 
     Parameters
@@ -409,6 +447,9 @@ def assign_points_to_simplified_nodes(
         Raw Reeb nodes from build_reeb_graph
     keep_ids : np.ndarray
         Raw node indices kept after simplification
+    simp_node_paths : list of list of int
+        Raw node ids encountered along each simplified edge path,
+        including endpoints.
     step_vertices : list of np.ndarray
         Per-slice active vertex indices (compact)
     step_comp_ids : list of np.ndarray
@@ -427,54 +468,78 @@ def assign_points_to_simplified_nodes(
     point_assignment : np.ndarray, shape (N,)
         Simplified node index for each point (-1 if no kept nodes)
     node_points : list of np.ndarray
-        List of point index arrays per simplified node
+        Ownership partition of points per simplified node.
+    node_support_points : list of np.ndarray
+        Intrinsic support points for the kept simplified nodes only.
     """
     N = int(filter_values.shape[0])
     point_assignment = -np.ones(N, dtype=int)
     best_dist = np.full(N, np.inf, dtype=float)
 
     if keep_ids.size == 0:
-        return point_assignment, []
+        return point_assignment, [], []
 
     raw2simp = -np.ones(len(reeb_nodes), dtype=int)
     for new_id, old_id in enumerate(keep_ids):
         raw2simp[int(old_id)] = new_id
 
-    # Precompute filter value per kept node
+    # Precompute filter value per kept node for the fallback step only.
     keep_node_f = np.empty(len(keep_ids), dtype=float)
     for new_id, old_id in enumerate(keep_ids):
         s = reeb_nodes[int(old_id)]["step"]
         keep_node_f[new_id] = float(t_vals[int(s)])
 
-    # 1) Assign points from kept raw nodes
-    uniq_v_arr = np.asarray(uniq_v, dtype=int)
+    raw_node_points = _compute_raw_node_supports(
+        reeb_nodes=reeb_nodes,
+        step_vertices=step_vertices,
+        step_comp_ids=step_comp_ids,
+        uniq_v=uniq_v,
+    )
+    node_support_points = [raw_node_points[int(old_id)] for old_id in keep_ids]
     f = np.asarray(filter_values, dtype=float)
+
+    # 1) Assign points from kept raw nodes directly.
     for old_id in keep_ids:
         old_id = int(old_id)
         new_id = raw2simp[old_id]
-        info = reeb_nodes[old_id]
-        s = int(info["step"])
-        c = int(info["comp"])
+        pts = raw_node_points[old_id]
+        if pts.size == 0:
+            continue
+        point_assignment[pts] = new_id
+        best_dist[pts] = 0.0
 
-        vs = step_vertices[s]
-        cs = step_comp_ids[s]
-        if vs.size == 0:
+    # 2) Reassign contracted raw-node supports by nearest endpoint along
+    # the contracted raw-node path.
+    for node_path in simp_node_paths:
+        if len(node_path) < 3:
+            continue
+        left_old = int(node_path[0])
+        right_old = int(node_path[-1])
+        left_new = raw2simp[left_old]
+        right_new = raw2simp[right_old]
+        if left_new < 0 or right_new < 0:
             continue
 
-        mask = (cs == c)
-        comp_vs = vs[mask]
-        if comp_vs.size == 0:
-            comp_vs = vs
+        if left_new == right_new:
+            for old_id in node_path[1:-1]:
+                pts = raw_node_points[int(old_id)]
+                if pts.size > 0:
+                    point_assignment[pts] = left_new
+                    best_dist[pts] = 0.0
+            continue
 
-        orig_idx = uniq_v_arr[comp_vs]
-        d = np.abs(f[orig_idx] - keep_node_f[new_id])
-        better = d < best_dist[orig_idx]
-        if np.any(better):
-            sel = orig_idx[better]
-            point_assignment[sel] = new_id
-            best_dist[sel] = d[better]
+        last_idx = len(node_path) - 1
+        for idx, old_id in enumerate(node_path[1:-1], start=1):
+            pts = raw_node_points[int(old_id)]
+            if pts.size == 0:
+                continue
+            left_steps = idx
+            right_steps = last_idx - idx
+            target = left_new if left_steps <= right_steps else right_new
+            point_assignment[pts] = target
+            best_dist[pts] = 0.0
 
-    # 2) Assign remaining points by nearest kept node in filter space
+    # 3) Assign remaining points by nearest kept node in filter space.
     unassigned = np.flatnonzero(point_assignment == -1)
     if unassigned.size > 0:
         K = keep_node_f.shape[0]
@@ -490,4 +555,4 @@ def assign_points_to_simplified_nodes(
     for k in range(len(keep_ids)):
         node_points.append(np.flatnonzero(point_assignment == k))
 
-    return point_assignment, node_points
+    return point_assignment, node_points, node_support_points

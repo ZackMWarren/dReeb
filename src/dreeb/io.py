@@ -23,7 +23,7 @@ def save_reeb(
     simp_edges : list of tuple
         Simplified edge list from simplify_reeb_graph
     node_pos : np.ndarray, shape (num_nodes, D)
-        Node positions in embedding space from plot_reeb
+        Node positions in embedding space from plot_dreeb
 
     Returns
     -------
