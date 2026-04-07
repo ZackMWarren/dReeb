@@ -8,7 +8,19 @@ assignment, and large intermediate outputs.
 
 The scalar filter is the first nontrivial diffusion eigenfunction computed
 separately on each connected component of the affinity graph. You can choose a
-later nontrivial eigenfunction with `diffusion_eigen_index`.
+later nontrivial eigenfunction with `diffusion_eigen_index`. As an
+alternative, you can use a rooted PHATE-style potential-distance filter with
+`filter_method="rooted_potential_distance"`.
+
+For the rooted potential-distance filter, `dreeb`:
+
+- builds the row-stochastic diffusion operator on each connected component
+- selects diffusion time with a PHATE-style Von Neumann entropy knee when
+  `diffusion_time="auto"`
+- computes `P^t`
+- chooses a root by two-sweep Dijkstra on the original sparse graph with edge
+  costs derived from `P^t`
+- uses rooted PHATE-style potential distance as the scalar filter
 
 ## Installation
 
@@ -97,6 +109,8 @@ stays stable.
 result = dreeb(
     X,
     diffusion_eigen_index=1,
+    filter_method="diffusion_eigenfunction",
+    diffusion_time="auto",
     return_raw=True,
     return_edge_lengths=True,
     return_simp_persistence=True,
@@ -113,6 +127,13 @@ result = dreeb(
 - `diffusion_eigen_index=1`
   Use the first nontrivial diffusion eigenfunction. Set `2`, `3`, ... to use
   later nontrivial diffusion eigenfunctions.
+- `filter_method="diffusion_eigenfunction"`
+  Use the default diffusion-eigenfunction scalar filter, or set
+  `filter_method="rooted_potential_distance"` to use a rooted PHATE-style
+  potential-distance filter.
+- `diffusion_time="auto"`
+  When using `filter_method="rooted_potential_distance"`, select diffusion
+  time with the entropy-knee heuristic. You can also pass an explicit integer.
 - `return_edge_lengths=True`
   Return filter-space edge lengths in the graph sections that are present.
 - `return_simp_persistence=True`
@@ -154,6 +175,16 @@ Use the second nontrivial diffusion eigenfunction:
 result = dreeb(X, diffusion_eigen_index=2)
 ```
 
+Use the rooted potential-distance filter:
+
+```python
+result = dreeb(
+    X,
+    filter_method="rooted_potential_distance",
+    diffusion_time="auto",
+)
+```
+
 Simplified graph plus node assignment:
 
 ```python
@@ -193,6 +224,57 @@ result = dreeb(X, return_raw_persistence=True)
 
 raw_pd = result["raw"]["persistence"]
 ```
+
+Inspect the filter metadata used during construction:
+
+```python
+result = dreeb(
+    X,
+    filter_method="rooted_potential_distance",
+    return_intermediates=True,
+)
+
+meta = result["intermediates"]["filter_metadata"]
+root_ids = meta["component_root_indices"]
+root_pairs = meta["component_root_pairs"]
+times = result["intermediates"]["filter_aux_values"]
+```
+
+For the default diffusion-eigenfunction filter, `filter_aux_values` contains
+the selected per-component diffusion eigenvalues and is also available as
+`result["intermediates"]["diffusion_eigenvalues"]`. For the rooted
+potential-distance filter, `filter_aux_values` contains the selected
+per-component diffusion times.
+
+## Filter Modes
+
+`dreeb()` supports two scalar filter constructions:
+
+- `filter_method="diffusion_eigenfunction"`
+- `filter_method="rooted_potential_distance"`
+
+`diffusion_eigenfunction`:
+
+- computed separately on each connected component of the affinity graph
+- uses the `diffusion_eigen_index`-th nontrivial diffusion eigenfunction
+- ignores `diffusion_time`
+
+`rooted_potential_distance`:
+
+- computed separately on each connected component of the affinity graph
+- uses PHATE-style potential distance from an automatically selected root
+- uses `diffusion_time`, or selects it automatically with a PHATE-style
+  entropy knee when `diffusion_time="auto"`
+- stores per-component root information in
+  `result["intermediates"]["filter_metadata"]` when
+  `return_intermediates=True`
+
+Important note:
+
+- changing `diffusion_time` affects `rooted_potential_distance`
+- it does not meaningfully change the default single-eigenfunction filter,
+  because powering the diffusion operator changes eigenvalues but not
+  eigenvectors
 
 ## Point Assignment
 

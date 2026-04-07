@@ -19,6 +19,9 @@ def dreeb(
     k=80,
     precision=1.0,
     diffusion_eigen_index=1,
+    filter_method="diffusion_eigenfunction",
+    diffusion_time="auto",
+    diffusion_time_max=40,
     simplify=True,
     return_raw=False,
     return_edge_lengths=False,
@@ -45,6 +48,18 @@ def dreeb(
         One-based index of the nontrivial diffusion eigenfunction to use
         per connected component. `1` means the first nontrivial
         diffusion eigenfunction, `2` the second, and so on.
+    filter_method : {"diffusion_eigenfunction", "rooted_potential_distance"}, optional
+        Scalar filter construction method. The default uses a single
+        nontrivial diffusion eigenfunction. The rooted potential-distance
+        option uses a PHATE-style potential distance from an automatically
+        selected root in each connected component.
+    diffusion_time : {"auto"} or int, optional (default: "auto")
+        Diffusion time for `filter_method="rooted_potential_distance"`.
+        Ignored for `diffusion_eigenfunction`.
+    diffusion_time_max : int, optional (default: 40)
+        Maximum time tested by the entropy-knee heuristic when
+        `diffusion_time="auto"` and
+        `filter_method="rooted_potential_distance"`.
     simplify : bool, optional (default: True)
         If True, simplify the Reeb graph by contracting degree-2 chains.
     return_raw : bool, optional (default: False)
@@ -88,10 +103,19 @@ def dreeb(
         )
 
     W = build_affinity_matrix(X, k=k)
-    filter_values, components, diffusion_eigenvalues = compute_diffusion_filter(
+    (
+        filter_values,
+        components,
+        filter_aux_values,
+        filter_metadata,
+    ) = compute_diffusion_filter(
         W,
         diffusion_eigen_index=diffusion_eigen_index,
         precision=precision,
+        filter_method=filter_method,
+        diffusion_time=diffusion_time,
+        diffusion_time_max=diffusion_time_max,
+        return_metadata=True,
     )
 
     prep_state = prepare_reeb(W, filter_values)
@@ -358,12 +382,16 @@ def dreeb(
         result["intermediates"] = {
             "W": W,
             "components": components,
+            "filter_method": filter_method,
             "diffusion_eigen_index": int(diffusion_eigen_index),
-            "diffusion_eigenvalues": diffusion_eigenvalues,
+            "filter_aux_values": filter_aux_values,
+            "filter_metadata": filter_metadata,
             "filter_values": filter_values,
             "prep_state": prep_state,
             "step_vertices": step_vertices,
             "step_comp_ids": step_comp_ids,
         }
+        if filter_method == "diffusion_eigenfunction":
+            result["intermediates"]["diffusion_eigenvalues"] = filter_aux_values
 
     return result

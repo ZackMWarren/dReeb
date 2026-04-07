@@ -55,3 +55,28 @@ def test_simplified_node_and_edge_assignments_cover_dataset():
         np.sort(simplified["point_edge_assignment"]),
         np.repeat(np.arange(len(simplified["edges"])), [len(x) for x in simplified["edge_points"]]),
     )
+
+
+def test_rooted_potential_distance_filter_runs_through_main_api():
+    X = sample_line()
+    result = dreeb(
+        X,
+        k=8,
+        filter_method="rooted_potential_distance",
+        return_intermediates=True,
+    )
+
+    simplified = result["simplified"]
+    intermediates = result["intermediates"]
+
+    assert result["primary_graph"] == "simplified"
+    assert len(simplified["nodes"]) >= 1
+    assert len(simplified["edges"]) >= 0
+    assert intermediates["filter_method"] == "rooted_potential_distance"
+    assert "diffusion_eigenvalues" not in intermediates
+    assert intermediates["filter_values"].shape == (X.shape[0],)
+
+    filter_metadata = intermediates["filter_metadata"]
+    assert filter_metadata["filter_method"] == "rooted_potential_distance"
+    assert filter_metadata["component_root_indices"].shape[0] == len(intermediates["components"])
+    assert filter_metadata["component_root_pairs"].shape == (len(intermediates["components"]), 2)
